@@ -1,0 +1,217 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>PhotoCast Receiver</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+                 font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+    /* Two stacked layers so consecutive photos can crossfade / slide. */
+    .layer {
+      position: absolute; inset: 0;
+      background-repeat: no-repeat;
+      background-size: contain;            /* overridden per-photo by the "fit" mode */
+      background-position: center;         /* overridden per-photo by the "focus"    */
+      opacity: 0;
+      transition: opacity 900ms ease, transform 900ms ease;
+      transform: translateX(0);
+      will-change: opacity, transform;
+    }
+    .layer.show   { opacity: 1; transform: translateX(0); }
+    /* Slide-in: incoming starts off the right edge, outgoing exits left. */
+    .layer.slideInStart  { transform: translateX(100%);  opacity: 1; transition: none; }
+    .layer.slideOut      { transform: translateX(-100%); opacity: 1; }
+    /* Hard cut: no animation. */
+    .layer.cut { transition: none; }
+
+    /* Blurred fill backdrop: a zoomed, blurred copy behind a "contain" photo so the
+       letterbox bars are filled instead of black. Toggled by the "blur" fit mode. */
+    #backdrop {
+      position: absolute; inset: -8%;
+      background-size: cover; background-position: center; background-repeat: no-repeat;
+      filter: blur(34px) brightness(0.55); opacity: 0; transition: opacity 900ms ease;
+    }
+    #backdrop.show { opacity: 1; }
+
+    .layer.kenburns { animation: kenburns 18s ease-out forwards; }
+    @keyframes kenburns {
+      from { transform: scale(1.0)  translate(0, 0); }
+      to   { transform: scale(1.14) translate(var(--kb-x, -2%), var(--kb-y, -2%)); }
+    }
+
+    #caption {
+      position: absolute; left: 0; right: 0; bottom: 0;
+      padding: 28px 40px; color: #fff; font-size: 30px; font-weight: 600;
+      text-shadow: 0 2px 8px rgba(0,0,0,.8);
+      background: linear-gradient(to top, rgba(0,0,0,.55), transparent);
+      opacity: 0; transition: opacity 600ms ease;
+    }
+    #caption.show { opacity: 1; }
+
+    /* The CAF media element (used for video). Hidden while showing photos. */
+    cast-media-player { position: absolute; inset: 0; }
+    body.photos cast-media-player { visibility: hidden; }
+
+    #idle {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: #5a6573; font-size: 26px; letter-spacing: .04em;
+    }
+  </style>
+</head>
+<body class="photos">
+  <div id="backdrop"></div>
+  <div id="layerA" class="layer"></div>
+  <div id="layerB" class="layer"></div>
+  <div id="caption"></div>
+  <div id="idle">PhotoCast — ready</div>
+
+  <!-- The CAF media element handles video. -->
+  <cast-media-player></cast-media-player>
+
+  <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <script>
+    const layers = [document.getElementById('layerA'), document.getElementById('layerB')];
+    const backdrop = document.getElementById('backdrop');
+    const caption = document.getElementById('caption');
+    const idle = document.getElementById('idle');
+    let active = 0;
+    let loadSeq = 0;   // guards the deferred bitmap-free against a fast re-LOAD reusing the layer
+
+    // Map a focus keyword to a CSS background-position and a Ken Burns drift target.
+    function focusToPosition(focus) {
+      switch (focus) {
+        case 'top':    return { pos: 'center top',    kb: ['0%', '-3%'] };
+        case 'bottom': return { pos: 'center bottom', kb: ['0%', '3%']  };
+        case 'left':   return { pos: 'left center',   kb: ['-3%', '0%'] };
+        case 'right':  return { pos: 'right center',  kb: ['3%', '0%']  };
+        default:       return { pos: 'center center', kb: ['-2%', '-2%'] };
+      }
+    }
+
+    // p = { fit:'contain'|'cover'|'blur', effect:'none'|'kenburns',
+    //       transition:'fade'|'slide'|'cut', focus:'center'|'top'|... }
+    function showImage(url, title, p) {
+      p = p || {};
+      const fit = p.fit || 'contain';
+      const effect = p.effect || 'none';
+      const transition = p.transition || 'fade';
+      const { pos, kb } = focusToPosition(p.focus);
+
+      idle.style.display = 'none';
+      document.body.classList.add('photos');          // hide the video element
+
+      const prev = layers[active];
+      const next = layers[(active + 1) % 2];
+      const mySeq = ++loadSeq;
+      next.dataset.seq = mySeq;        // tag the incoming layer so a stale cleanup can't blank it
+
+      // Blurred-fill backdrop: only meaningful when the photo is "contain" (letterboxed).
+      if (fit === 'blur') {
+        backdrop.style.backgroundImage = `url("${url}")`;
+        backdrop.classList.add('show');
+      } else {
+        backdrop.classList.remove('show');
+      }
+
+      // Paint the incoming layer.
+      next.className = 'layer';                        // reset state classes
+      next.style.backgroundImage = `url("${url}")`;
+      next.style.backgroundSize = (fit === 'cover') ? 'cover' : 'contain';
+      next.style.backgroundPosition = pos;
+      next.style.setProperty('--kb-x', kb[0]);
+      next.style.setProperty('--kb-y', kb[1]);
+
+      // Transition the incoming layer in / outgoing layer out.
+      if (transition === 'cut') {
+        next.classList.add('cut', 'show');
+      } else if (transition === 'slide') {
+        next.classList.add('slideInStart');
+        // next frame: animate to resting position
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          next.classList.remove('slideInStart');
+          next.classList.add('show');
+          prev.classList.add('slideOut');
+        }));
+      } else { // fade
+        next.classList.add('show');
+      }
+      prev.classList.remove('show');
+
+      // Ken Burns runs on the visible layer (independent of the entrance transition).
+      if (effect === 'kenburns') {
+        next.classList.remove('kenburns'); void next.offsetWidth; next.classList.add('kenburns');
+      }
+
+      // Free the outgoing photo's decoded bitmap once it's off-screen — critical for surviving
+      // hundreds of loads on a 1–2 GB dongle without the receiver crashing. Skip if a faster
+      // re-LOAD has since repainted this same layer (its seq would no longer match the active one).
+      setTimeout(() => {
+        if (prev.dataset.seq !== String(loadSeq)) { prev.style.backgroundImage = 'none'; prev.className = 'layer'; }
+      }, 1000);
+
+      active = (active + 1) % 2;
+      caption.textContent = title || '';
+      caption.classList.toggle('show', !!title);
+    }
+
+    function showVideo() {
+      document.body.classList.remove('photos');        // reveal the video element
+      layers.forEach(l => { l.classList.remove('show'); l.style.backgroundImage = 'none'; });
+      backdrop.classList.remove('show'); backdrop.style.backgroundImage = 'none';
+      caption.classList.remove('show');
+      idle.style.display = 'none';
+    }
+
+    // --- Keep the screen awake while we're the foreground "screensaver" -------------
+    // The receiver page is served over HTTPS (a secure context), so the Wake Lock API
+    // is available here even though the media URLs are plain HTTP. This prevents the
+    // screen from dimming/locking; it is NOT guaranteed to suppress Android TV's Ambient
+    // overlay (that's a separate OS mechanism — the reliable lever is the sender keeping
+    // the slideshow advancing, plus the device's "Stay awake" developer toggle).
+    let wakeLock = null;
+    async function acquireWakeLock() {
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLock = await navigator.wakeLock.request('screen');
+          wakeLock.addEventListener('release', () => { wakeLock = null; });
+        }
+      } catch (e) { /* not fatal — fall back to slideshow-advance keep-awake */ }
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && wakeLock === null) acquireWakeLock();
+    });
+
+    const context = cast.framework.CastReceiverContext.getInstance();
+    const playerManager = context.getPlayerManager();
+
+    // Intercept every LOAD: route images to our crossfade/slide layer, video to CAF.
+    playerManager.setMessageInterceptor(
+      cast.framework.messages.MessageType.LOAD,
+      (request) => {
+        const media = request.media || {};
+        const ct = (media.contentType || '').toLowerCase();
+        const url = media.contentUrl || media.contentId;
+        const title = (media.metadata && media.metadata.title) || '';
+        const presentation = (media.customData && media.customData.presentation) || {};
+        if (ct.indexOf('image/') === 0) {
+          showImage(url, title, presentation);
+        } else {
+          showVideo();
+        }
+        return request;   // let CAF process it too (esp. for video)
+      }
+    );
+
+    // disableIdleTimeout keeps THIS receiver app from being torn down when playback goes
+    // idle (e.g. a single held photo) — without it the device drops back to the launcher.
+    // It does not by itself stop the system screensaver; see the Wake Lock note above.
+    const options = new cast.framework.CastReceiverOptions();
+    options.disableIdleTimeout = true;
+    context.start(options);
+    acquireWakeLock();
+  </script>
+</body>
+</html>
