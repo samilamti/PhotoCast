@@ -87,22 +87,6 @@
     .mapLayer { position: absolute; inset: 0; opacity: 0; transition: opacity 700ms ease; }
     .mapLayer.show { opacity: 1; }
     .mapLayer img { position: absolute; width: 256px; height: 256px; }
-    #mapMarker {
-      position: absolute; width: 16px; height: 16px; border-radius: 50%;
-      background: #e74c3c; border: 3px solid #fff; box-shadow: 0 1px 6px rgba(0,0,0,.6);
-      transform: translate(-50%, -50%);
-      transition: left 700ms ease, top 700ms ease;
-    }
-    #mapMarker::after {
-      content: ""; position: absolute; inset: -8px; border-radius: 50%;
-      border: 2px solid rgba(231,76,60,.55); animation: pulse 2.2s ease-out infinite;
-    }
-    /* Don't burn dongle GPU on the pulse while the map is faded out (e.g. during video). */
-    #map:not(.show) #mapMarker::after { animation: none; }
-    @keyframes pulse {
-      0%   { transform: scale(.6); opacity: 1; }
-      100% { transform: scale(1.5); opacity: 0; }
-    }
     #mapAttribution {
       position: absolute; right: 4px; bottom: 2px; font-size: 10px;
       color: rgba(0,0,0,.65); background: rgba(255,255,255,.6);
@@ -126,17 +110,17 @@
                 background-repeat: no-repeat; border-radius: 2px; }
     .card.dim { filter: brightness(.55); }
 
-    /* Stacking, bottom to top: backdrop -> photo layers (auto) -> scrim -> mini-map ->
-       scatter prints -> caption -> diagnostics.
-       The prints deliberately sit ABOVE the map: they are photos tossed onto a table, so they
-       should land ON the map and hide part of it. (They used to sit below it, and because
-       #scatter is positioned WITH a z-index it forms a stacking context, so even the featured
-       card's inline z-index 60 stayed trapped under the map — the map punched a hole in the
-       middle of the enlarged photo.) The caption stays on top of both so the where/when line
-       is never covered by a print. */
+    /* Stacking, bottom to top: backdrop -> photo layers (auto) -> resting prints (20-24) ->
+       scrim -> mini-map -> the FEATURED print (45) -> caption -> diagnostics.
+       Only the featured photo covers the map; the ones still lying on the table pass behind
+       it, so the map is never buried under scenery it isn't describing.
+       NOTE #scatter itself must NOT carry a z-index. It's positioned, so a z-index would make
+       it a stacking context and trap every card at one level — which is what previously kept
+       even the featured card (inline z-index 60) underneath the map. With `auto` the cards'
+       own z-indexes are compared against #map directly, which is the whole trick here.
+       CARD_Z / CARD_Z_FEATURED in the script are the values that straddle the map. */
     #scrim   { z-index: 30; }
     #map     { z-index: 40; }
-    #scatter { z-index: 45; }
     #caption { z-index: 50; }
 
     /* The CAF media element (used for video). Hidden while showing photos. */
@@ -177,7 +161,6 @@
   <div id="map">
     <div class="mapLayer" id="mapLayerA"></div>
     <div class="mapLayer" id="mapLayerB"></div>
-    <div id="mapMarker" style="display:none"></div>
     <div id="mapAttribution">© OpenStreetMap</div>
   </div>
   <div id="idle">PhotoCast — ready</div>
@@ -229,17 +212,28 @@
 
     // ------------------------------------------------------------------ mini-map
     // Hand-rolled OpenStreetMap tile compositor (no library): a small box of absolutely
-    // positioned 256px tiles centered on the current anchor. The map only RECENTERS when a
-    // photo is far from the anchor ("different city" — RECENTER_KM); nearer photos just move
-    // the marker inside the box. Two layers crossfade on recenter, old tiles are freed.
+    // positioned 256px tiles centered on the current anchor. Two layers crossfade on a
+    // recenter, old tiles are freed.
+    //
+    // There is deliberately NO marker. The point is the photo's general area, not a precise
+    // pin — so the map just shows the neighbourhood and the panel reads as context rather
+    // than as a GPS readout. That changes when it has to RECENTER, though: the old design
+    // held one anchor for a whole city (25 km) and let the marker travel inside the box, and
+    // with the marker gone that would leave the map showing a region the photo isn't even in.
+    // So recentering is now driven by the box itself — see `update`.
     const map = {
       el: document.getElementById('map'),
       layers: [document.getElementById('mapLayerA'), document.getElementById('mapLayerB')],
-      marker: document.getElementById('mapMarker'),
       active: 0,
       anchor: null,           // {lat, lon} the tiles are centered on
-      ZOOM: 10,
-      RECENTER_KM: 25,
+      // One step in (each level doubles the scale). At this zoom the panel covers roughly a
+      // city rather than a whole region — tight enough to recognise, wide enough to still read
+      // as "the general area" now that there is no pin.
+      ZOOM: 11,
+      // Recenter once the photo drifts past this fraction of the box's half-width/height.
+      // Below it the existing tiles still comfortably contain the photo, so we leave them
+      // alone rather than refetch tiles on every slide.
+      DRIFT_FRACTION: 0.35,
 
       tileXY(lat, lon, z) {
         const n = Math.pow(2, z);
@@ -247,13 +241,6 @@
         const latR = lat * Math.PI / 180;
         const y = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
         return { x, y };
-      },
-
-      distanceKm(a, b) {
-        const R = 6371, dLat = (b.lat - a.lat) * Math.PI / 180, dLon = (b.lon - a.lon) * Math.PI / 180;
-        const s = Math.sin(dLat / 2) ** 2 +
-                  Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-        return 2 * R * Math.asin(Math.sqrt(s));
       },
 
       // Fill one layer with the tiles around `center` and crossfade it in.
@@ -288,28 +275,24 @@
         this.anchor = center;
       },
 
-      // Place the marker at the photo's offset from the anchor, clamped inside the box.
-      placeMarker(loc) {
+      // How far `loc` sits from the current anchor, as a fraction of the box's half-size.
+      // Measured in PIXELS AT THE CURRENT ZOOM rather than in km, so the threshold keeps
+      // meaning the same thing on any screen size and at any zoom level.
+      driftFromAnchor(loc) {
         const box = this.el.getBoundingClientRect();
         const a = this.tileXY(this.anchor.lat, this.anchor.lon, this.ZOOM);
         const p = this.tileXY(loc.lat, loc.lon, this.ZOOM);
-        let dx = (p.x - a.x) * 256, dy = (p.y - a.y) * 256;
-        const maxX = box.width * 0.44, maxY = box.height * 0.44;
-        dx = Math.max(-maxX, Math.min(maxX, dx));
-        dy = Math.max(-maxY, Math.min(maxY, dy));
-        this.marker.style.display = '';
-        this.marker.style.left = (box.width / 2 + dx) + 'px';
-        this.marker.style.top = (box.height / 2 + dy) + 'px';
+        const dx = Math.abs(p.x - a.x) * 256, dy = Math.abs(p.y - a.y) * 256;
+        return Math.max(dx / (box.width / 2), dy / (box.height / 2));
       },
 
       // The per-photo entry point. Missing coordinates keep the last map (trip context).
       update(photo) {
         if (!photo || typeof photo.lat !== 'number' || typeof photo.lon !== 'number') return;
         const loc = { lat: photo.lat, lon: photo.lon };
-        if (!this.anchor || this.distanceKm(this.anchor, loc) > this.RECENTER_KM) {
+        if (!this.anchor || this.driftFromAnchor(loc) > this.DRIFT_FRACTION) {
           this.render(loc);
         }
-        this.placeMarker(loc);
         this.el.classList.add('show');
       },
 
@@ -760,6 +743,12 @@
     const CARD_PAD = 7;
     document.documentElement.style.setProperty('--card-pad', CARD_PAD + 'px');
 
+    // Card stacking. These straddle #map (z-index 40) on purpose: a print lying on the table
+    // passes BEHIND the map, and only the one currently being featured rises above it.
+    // CARD_Z_FEATURED stays under #caption (50) so the where/when line is never covered.
+    const CARD_Z = 20;            // resting prints: CARD_Z + index, all below the map
+    const CARD_Z_FEATURED = 45;   // the one being shown: above the map, below the caption
+
     const scatter = {
       timers: [], cards: [],
 
@@ -836,7 +825,7 @@
           card.style.height = h + 'px';
           card.style.marginLeft = (-w / 2 - CARD_PAD) + 'px';   // center (incl. the print border)
           card.style.marginTop = (-h / 2 - CARD_PAD) + 'px';
-          card.style.zIndex = 20 + i;
+          card.style.zIndex = CARD_Z + i;
           const ph = document.createElement('div');
           ph.className = 'ph';
           ph.style.backgroundImage = `url("${it.url}")`;
@@ -862,7 +851,7 @@
           const featureAt = 1800 + i * intervalMs;
           this.timers.push(setTimeout(() => {
             const scale = Math.min(vw * 0.78 / w, vh * 0.72 / h);
-            card.style.zIndex = 60;
+            card.style.zIndex = CARD_Z_FEATURED;
             card.classList.remove('dim');
             card.style.transform = `translate(0px, ${-vh * 0.03}px) rotate(0deg) scale(${scale})`;
             this.cards.forEach(c => { if (c !== card) c.classList.add('dim'); });
@@ -874,7 +863,7 @@
           // until the next LOAD replaces the batch).
           if (i < items.length - 1) {
             this.timers.push(setTimeout(() => {
-              card.style.zIndex = 20 + i;
+              card.style.zIndex = CARD_Z + i;
               card.style.transform =
                 `translate(${spots[i].x}px, ${spots[i].y}px) rotate(${spots[i].r}deg)`;
             }, featureAt + intervalMs - 150));
