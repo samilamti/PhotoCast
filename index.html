@@ -126,9 +126,18 @@
                 background-repeat: no-repeat; border-radius: 2px; }
     .card.dim { filter: brightness(.55); }
 
-    #caption, #map { z-index: 40; }
-    #scrim { z-index: 30; }
-    #scatter { z-index: 20; }
+    /* Stacking, bottom to top: backdrop -> photo layers (auto) -> scrim -> mini-map ->
+       scatter prints -> caption -> diagnostics.
+       The prints deliberately sit ABOVE the map: they are photos tossed onto a table, so they
+       should land ON the map and hide part of it. (They used to sit below it, and because
+       #scatter is positioned WITH a z-index it forms a stacking context, so even the featured
+       card's inline z-index 60 stayed trapped under the map — the map punched a hole in the
+       middle of the enlarged photo.) The caption stays on top of both so the where/when line
+       is never covered by a print. */
+    #scrim   { z-index: 30; }
+    #map     { z-index: 40; }
+    #scatter { z-index: 45; }
+    #caption { z-index: 50; }
 
     /* The CAF media element (used for video). Hidden while showing photos. */
     cast-media-player { position: absolute; inset: 0; }
@@ -138,6 +147,21 @@
       position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
       color: #5a6573; font-size: 26px; letter-spacing: .04em;
     }
+
+    /* Diagnostic card, top-left. Only ever appears when the phone's music was asked for and
+       could not be played — the TV is the only place that failure is observable, so it has to
+       say WHY here rather than fail silently into the ambient pad. Auto-hides. */
+    #diag {
+      position: absolute; left: 48px; top: 40px; z-index: 60; max-width: 46vw;
+      background: rgba(12,16,22,.88); border: 1px solid rgba(255,255,255,.22);
+      border-radius: 10px; padding: 14px 18px; color: #fff;
+      font-size: 15px; line-height: 1.45;
+      opacity: 0; transition: opacity 500ms ease; pointer-events: none;
+    }
+    #diag.show { opacity: 1; }
+    #diagTitle { font-weight: 700; font-size: 17px; margin-bottom: 6px; }
+    #diagBody { color: rgba(255,255,255,.8); font-family: ui-monospace, Menlo, monospace;
+                font-size: 13px; white-space: pre-wrap; word-break: break-all; }
   </style>
 </head>
 <body class="photos">
@@ -157,6 +181,10 @@
     <div id="mapAttribution">© OpenStreetMap</div>
   </div>
   <div id="idle">PhotoCast — ready</div>
+  <div id="diag">
+    <div id="diagTitle"></div>
+    <div id="diagBody"></div>
+  </div>
 
   <!-- Music streamed from the phone (mode "phone"): the sender exports the chosen songs and
        serves them off its own LAN HTTP server, same as the photos. Separate from
@@ -484,28 +512,71 @@
       }
     };
 
+    // ------------------------------------------------------------------ on-screen diagnostics
+    // A failure that only happens on the TV can't be read from a console, so it gets shown.
+    const diag = {
+      el: document.getElementById('diag'),
+      title: document.getElementById('diagTitle'),
+      body: document.getElementById('diagBody'),
+      timer: null,
+      show(title, lines, url) {
+        this.title.textContent = title;
+        this.body.textContent = (lines || []).join('\n') + (url ? '\n' + url : '');
+        this.el.classList.add('show');
+        clearTimeout(this.timer);
+        this.timer = setTimeout(() => this.hide(), 30000);
+      },
+      hide() { clearTimeout(this.timer); this.el.classList.remove('show'); }
+    };
+
     // ------------------------------------------------------------------ phone music stream
     // mode "phone": the sender exported the user's chosen songs and serves them off its own
     // LAN HTTP server; we just play the list here and loop it. The playlist arrives on EVERY
     // image LOAD, so an unchanged list must NOT restart the song — that's what `sig` guards.
     //
-    // The receiver page is HTTPS and the track URLs are plain HTTP, same as the photos. If the
-    // device's browser refuses that for <audio> (mixed content) every track errors immediately;
-    // `onExhausted` then falls the whole feature back to the synthesized pad rather than
-    // leaving the slideshow silent, and the dead playlist isn't retried until it changes.
+    // Getting a picked song to actually play took three defences, because a Cast receiver is a
+    // hostile environment for an <audio> element and the first build hit at least one of them
+    // (songs silently fell back to the pad on the TV):
+    //   1. muted autoplay then unmute — no user gesture exists here, so audible autoplay is
+    //      refused (see startPlayback);
+    //   2. a blob: retry — the page is a PUBLIC https origin loading from a PRIVATE address,
+    //      which Chrome refuses for media ("Permission was denied for this request to access
+    //      the `local` address space"; images are exempt, which is why photos were fine). The
+    //      phone now sends CORS + Private-Network headers, and fetch-to-blob is the backstop;
+    //   3. audio/mp4 rather than the UTI table's audio/x-m4a.
+    // If all three still fail, `onExhausted` falls back to the synthesized pad rather than
+    // leaving the slideshow silent, the dead playlist isn't retried until it changes, and the
+    // reason is put ON SCREEN via `diag` — the TV is the only place this is observable.
     const stream = {
       el: document.getElementById('tune'),
       tracks: [], idx: 0, sig: '', deadSig: '', on: false, errors: 0, fadeTimer: null,
+      blobUrl: null, triedBlob: false, notes: [],
       TARGET_VOLUME: 0.7,
       onExhausted: null,
 
       init() {
         this.el.addEventListener('ended', () => this.advance(1));
-        this.el.addEventListener('error', () => this.handleError());
+        this.el.addEventListener('error', () => {
+          const e = this.el.error;
+          this.note('media error code=' + (e && e.code) + ' ' + ((e && e.message) || ''));
+          this.recover();
+        });
         // Anything that actually plays proves the list is fine, so the error budget below
         // counts CONSECUTIVE failures — otherwise a stray hiccup an hour in would eventually
         // add up to "playlist dead" while the music was happily playing.
-        this.el.addEventListener('playing', () => { this.errors = 0; });
+        // It's also where the muted-autoplay start (see load) is undone.
+        this.el.addEventListener('playing', () => {
+          this.errors = 0;
+          this.triedBlob = false;
+          if (this.el.muted) { this.el.muted = false; this.fadeTo(this.TARGET_VOLUME, 1200); }
+          this.note('playing ' + (this.tracks[this.idx] && this.tracks[this.idx].title || ''));
+          diag.hide();
+        });
+      },
+
+      note(text) {
+        this.notes.push(text);
+        if (this.notes.length > 8) this.notes.shift();
       },
 
       signature(tracks) { return tracks.map(t => t && t.url).join('|'); },
@@ -519,6 +590,7 @@
         if (shuffle) this.tracks.sort(() => Math.random() - 0.5);
         this.idx = 0;
         this.errors = 0;
+        this.notes = [];
         this.on = true;
         this.load();
         return true;
@@ -527,11 +599,86 @@
       load() {
         const track = this.tracks[this.idx];
         if (!track || !track.url) { this.advance(1); return; }
-        this.el.src = track.url;
+        this.triedBlob = false;
+        this.releaseBlob();
+        this.startPlayback(track.url, 'direct');
+      },
+
+      // Start MUTED. Chrome's autoplay policy blocks audible playback that no user gesture
+      // asked for — and a Cast receiver has no gestures at all — but muted playback is always
+      // allowed, and unmuting once it is already running is not re-gated. The 'playing'
+      // listener above does the unmute + fade. (The synthesized pad is unaffected by this:
+      // Web Audio isn't governed by the same policy, which is exactly why ambient always
+      // worked while picked songs never did.)
+      startPlayback(src, how) {
+        this.el.muted = true;
         this.el.volume = 0;
+        this.el.src = src;
         const started = this.el.play();
-        if (started && started.catch) started.catch(() => this.handleError());
-        this.fadeTo(this.TARGET_VOLUME, 1200);
+        if (started && started.catch) {
+          started.catch(err => {
+            this.note('play() rejected (' + how + '): ' + err.name + ' — ' + err.message);
+            this.recover();
+          });
+        }
+      },
+
+      // Second chance for a track the media element refused to load: fetch the bytes and hand
+      // them over as a blob: URL. A blob is same-origin, so it sidesteps whatever refused the
+      // cross-origin/private-address load — provided fetch() itself is allowed, which is what
+      // the CORS + Private-Network headers on the phone's server are for. Cheap in memory:
+      // it holds the COMPRESSED file (a few MB), not decoded audio.
+      tryBlob() {
+        const track = this.tracks[this.idx];
+        if (!track || this.triedBlob) return false;
+        this.triedBlob = true;
+        fetch(track.url, { mode: 'cors', cache: 'no-store' })
+          .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+          .then(b => {
+            if (!this.on) return;
+            this.releaseBlob();
+            // Force a type Chrome definitely accepts. Anything non-audio, and specifically the
+            // UTI table's `audio/x-m4a` (which canPlayType only rates "maybe"), becomes
+            // audio/mp4 — the same container, under the type Chrome rates "probably".
+            const usable = /^audio\//.test(b.type) && b.type !== 'audio/x-m4a';
+            const typed = usable ? b : new Blob([b], { type: 'audio/mp4' });
+            this.blobUrl = URL.createObjectURL(typed);
+            this.note('retrying via blob: (' + Math.round(typed.size / 1024) + ' KB, ' + typed.type + ')');
+            this.startPlayback(this.blobUrl, 'blob');
+          })
+          .catch(e => {
+            this.note('fetch failed: ' + e.name + ' — ' + e.message);
+            this.giveUpOnTrack();
+          });
+        return true;
+      },
+
+      releaseBlob() {
+        if (this.blobUrl) { URL.revokeObjectURL(this.blobUrl); this.blobUrl = null; }
+      },
+
+      // A direct load failed: try the blob route once for this track before writing it off.
+      recover() {
+        if (!this.on) return;
+        if (this.tryBlob()) return;
+        this.giveUpOnTrack();
+      },
+
+      // A whole lap of the playlist failing back-to-back means it's unplayable (bad URLs, the
+      // phone asleep, or the browser refusing the private-address load) — give up and let the
+      // caller fall back to the pad, and put the reason on screen so it can be diagnosed.
+      giveUpOnTrack() {
+        if (!this.on) return;
+        this.errors++;
+        if (this.errors >= this.tracks.length) {
+          this.deadSig = this.sig;
+          this.stop();
+          diag.show('Phone music unavailable — using ambient', this.notes,
+                    (this.tracks[0] && this.tracks[0].url) || '');
+          if (this.onExhausted) this.onExhausted();
+          return;
+        }
+        this.advance(1);
       },
 
       advance(step) {
@@ -540,32 +687,18 @@
         this.load();
       },
 
-      // A whole lap of the playlist failing back-to-back means it's unplayable (bad URLs, phone
-      // asleep, or the browser blocking mixed content) — give up and let the caller fall back.
-      handleError() {
-        if (!this.on) return;
-        this.errors++;
-        if (this.errors >= this.tracks.length) {
-          this.deadSig = this.sig;
-          this.stop();
-          if (this.onExhausted) this.onExhausted();
-          return;
-        }
-        this.advance(1);
-      },
-
       resume() {
         if (this.el.paused) {
           const p = this.el.play();
           if (p && p.catch) p.catch(() => {});
         }
-        this.fadeTo(this.TARGET_VOLUME, 600);
+        if (!this.el.muted) this.fadeTo(this.TARGET_VOLUME, 600);
       },
 
       stop() {
         if (!this.on) return;
         this.on = false;
-        this.fadeTo(0, 900, () => { this.el.pause(); });
+        this.fadeTo(0, 900, () => { this.el.pause(); this.releaseBlob(); });
       },
 
       // <audio>.volume takes no AudioParam ramps, so step it by hand.
@@ -873,6 +1006,7 @@
     // without this the music would keep playing over an empty receiver indefinitely.
     function handleStopped() {
       music.silence();
+      diag.hide();
       lastShown = null;
       layers.forEach(l => { l.classList.remove('show'); l.style.backgroundImage = 'none'; l.className = 'layer'; });
       backdrop.classList.remove('show'); backdrop.style.backgroundImage = 'none';
@@ -930,7 +1064,7 @@
     if (TEST_MODE) {
       // Browser test harness: drive the page without a Cast device.
       window.__pc = { handleLoad, handleStopped, showImage, showScatter, showVideo,
-                      music, ambient, stream, AMBIENT_STYLES, map, setCaption, CARD_PAD };
+                      music, ambient, stream, diag, AMBIENT_STYLES, map, setCaption, CARD_PAD };
       idle.textContent = 'PhotoCast — test mode';
     }
 
