@@ -42,14 +42,79 @@
       to   { transform: scale(1.14) translate(var(--kb-x, -2%), var(--kb-y, -2%)); }
     }
 
-    #caption {
-      position: absolute; left: 0; right: 0; bottom: 0;
-      padding: 28px 40px; color: #fff; font-size: 30px; font-weight: 600;
-      text-shadow: 0 2px 8px rgba(0,0,0,.8);
+    /* Bottom scrim so the caption stays readable on bright photos. */
+    #scrim {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 160px; pointer-events: none;
       background: linear-gradient(to top, rgba(0,0,0,.55), transparent);
       opacity: 0; transition: opacity 600ms ease;
     }
+    #scrim.show { opacity: 1; }
+
+    /* Where + when the photo was taken (replaces the old one-line title caption).
+       48px insets keep everything clear of TV overscan. */
+    #caption {
+      position: absolute; left: 48px; bottom: 44px; max-width: 55vw;
+      color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.8);
+      opacity: 0; transition: opacity 600ms ease;
+    }
     #caption.show { opacity: 1; }
+    #captionPlace { font-size: 34px; font-weight: 650; line-height: 1.2; }
+    #captionWhen  { font-size: 24px; font-weight: 400; margin-top: 6px; color: rgba(255,255,255,.85); }
+
+    /* Mini-map, right-hand side. Two inner layers crossfade on a recenter. */
+    #map {
+      position: absolute; right: 48px; bottom: 44px;
+      width: 22vw; height: 15vw; min-width: 280px; min-height: 190px;
+      border-radius: 12px; overflow: hidden;
+      border: 2px solid rgba(255,255,255,.30);
+      box-shadow: 0 8px 30px rgba(0,0,0,.55);
+      opacity: 0; transition: opacity 700ms ease;
+      background: #1a2129;
+    }
+    #map.show { opacity: 1; }
+    .mapLayer { position: absolute; inset: 0; opacity: 0; transition: opacity 700ms ease; }
+    .mapLayer.show { opacity: 1; }
+    .mapLayer img { position: absolute; width: 256px; height: 256px; }
+    #mapMarker {
+      position: absolute; width: 16px; height: 16px; border-radius: 50%;
+      background: #e74c3c; border: 3px solid #fff; box-shadow: 0 1px 6px rgba(0,0,0,.6);
+      transform: translate(-50%, -50%);
+      transition: left 700ms ease, top 700ms ease;
+    }
+    #mapMarker::after {
+      content: ""; position: absolute; inset: -8px; border-radius: 50%;
+      border: 2px solid rgba(231,76,60,.55); animation: pulse 2.2s ease-out infinite;
+    }
+    /* Don't burn dongle GPU on the pulse while the map is faded out (e.g. during video). */
+    #map:not(.show) #mapMarker::after { animation: none; }
+    @keyframes pulse {
+      0%   { transform: scale(.6); opacity: 1; }
+      100% { transform: scale(1.5); opacity: 0; }
+    }
+    #mapAttribution {
+      position: absolute; right: 4px; bottom: 2px; font-size: 10px;
+      color: rgba(0,0,0,.65); background: rgba(255,255,255,.6);
+      padding: 1px 4px; border-radius: 3px;
+    }
+
+    /* Scatter: up to five photo "prints" tossed on the table, then featured in turn. */
+    #scatter { position: absolute; inset: 0; }
+    .card {
+      position: absolute; left: 50%; top: 50%;
+      background: #fff; border-radius: 4px;
+      padding: 10px;                            /* the white print border */
+      box-shadow: 0 12px 40px rgba(0,0,0,.6);
+      transition: transform 1000ms cubic-bezier(.22,.9,.34,1), opacity 400ms ease,
+                  filter 800ms ease;
+      will-change: transform;
+    }
+    .card .ph { width: 100%; height: 100%; background-size: cover; background-position: center;
+                background-repeat: no-repeat; border-radius: 2px; }
+    .card.dim { filter: brightness(.55); }
+
+    #caption, #map { z-index: 40; }
+    #scrim { z-index: 30; }
+    #scatter { z-index: 20; }
 
     /* The CAF media element (used for video). Hidden while showing photos. */
     cast-media-player { position: absolute; inset: 0; }
@@ -65,7 +130,18 @@
   <div id="backdrop"></div>
   <div id="layerA" class="layer"></div>
   <div id="layerB" class="layer"></div>
-  <div id="caption"></div>
+  <div id="scatter"></div>
+  <div id="scrim"></div>
+  <div id="caption">
+    <div id="captionPlace"></div>
+    <div id="captionWhen"></div>
+  </div>
+  <div id="map">
+    <div class="mapLayer" id="mapLayerA"></div>
+    <div class="mapLayer" id="mapLayerB"></div>
+    <div id="mapMarker" style="display:none"></div>
+    <div id="mapAttribution">© OpenStreetMap</div>
+  </div>
   <div id="idle">PhotoCast — ready</div>
 
   <!-- The CAF media element handles video. -->
@@ -75,11 +151,364 @@
   <script>
     const layers = [document.getElementById('layerA'), document.getElementById('layerB')];
     const backdrop = document.getElementById('backdrop');
+    const scrim = document.getElementById('scrim');
     const caption = document.getElementById('caption');
+    const captionPlace = document.getElementById('captionPlace');
+    const captionWhen = document.getElementById('captionWhen');
     const idle = document.getElementById('idle');
+    const scatterRoot = document.getElementById('scatter');
     let active = 0;
     let loadSeq = 0;   // guards the deferred bitmap-free against a fast re-LOAD reusing the layer
 
+    // ------------------------------------------------------------------ caption
+    // New senders attach customData.photo = {place, dateText, timeText, lat, lon};
+    // old senders only have metadata.title — keep showing that so they don't regress.
+    function setCaption(photo, legacyTitle) {
+      let place = '', when = '';
+      if (photo && typeof photo === 'object') {
+        place = photo.place || '';
+        when = [photo.dateText, photo.timeText].filter(Boolean).join('  ');
+        if (!place && when) { place = when; when = ''; }   // time-only: promote to the big line
+      } else {
+        place = legacyTitle || '';
+      }
+      captionPlace.textContent = place;
+      captionWhen.textContent = when;
+      captionWhen.style.display = when ? '' : 'none';
+      const show = !!place;
+      caption.classList.toggle('show', show);
+      scrim.classList.toggle('show', show);
+    }
+
+    // ------------------------------------------------------------------ mini-map
+    // Hand-rolled OpenStreetMap tile compositor (no library): a small box of absolutely
+    // positioned 256px tiles centered on the current anchor. The map only RECENTERS when a
+    // photo is far from the anchor ("different city" — RECENTER_KM); nearer photos just move
+    // the marker inside the box. Two layers crossfade on recenter, old tiles are freed.
+    const map = {
+      el: document.getElementById('map'),
+      layers: [document.getElementById('mapLayerA'), document.getElementById('mapLayerB')],
+      marker: document.getElementById('mapMarker'),
+      active: 0,
+      anchor: null,           // {lat, lon} the tiles are centered on
+      ZOOM: 10,
+      RECENTER_KM: 25,
+
+      tileXY(lat, lon, z) {
+        const n = Math.pow(2, z);
+        const x = (lon + 180) / 360 * n;
+        const latR = lat * Math.PI / 180;
+        const y = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
+        return { x, y };
+      },
+
+      distanceKm(a, b) {
+        const R = 6371, dLat = (b.lat - a.lat) * Math.PI / 180, dLon = (b.lon - a.lon) * Math.PI / 180;
+        const s = Math.sin(dLat / 2) ** 2 +
+                  Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(s));
+      },
+
+      // Fill one layer with the tiles around `center` and crossfade it in.
+      render(center) {
+        const box = this.el.getBoundingClientRect();
+        const W = box.width, H = box.height;
+        const c = this.tileXY(center.lat, center.lon, this.ZOOM);
+        const cx = c.x * 256, cy = c.y * 256;
+        const left = cx - W / 2, top = cy - H / 2;
+        const n = Math.pow(2, this.ZOOM);
+
+        const incoming = this.layers[(this.active + 1) % 2];
+        const outgoing = this.layers[this.active];
+        incoming.innerHTML = '';
+        for (let tx = Math.floor(left / 256); tx * 256 < left + W; tx++) {
+          for (let ty = Math.floor(top / 256); ty * 256 < top + H; ty++) {
+            if (ty < 0 || ty >= n) continue;
+            const img = document.createElement('img');
+            const wx = ((tx % n) + n) % n;               // wrap antimeridian
+            img.onerror = () => img.remove();            // failed tile -> quiet dark gap, no broken icon
+            img.src = `https://tile.openstreetmap.org/${this.ZOOM}/${wx}/${ty}.png`;
+            img.style.left = (tx * 256 - left) + 'px';
+            img.style.top = (ty * 256 - top) + 'px';
+            incoming.appendChild(img);
+          }
+        }
+        incoming.classList.add('show');
+        outgoing.classList.remove('show');
+        // Free the outgoing tiles once the crossfade is over.
+        setTimeout(() => { if (!outgoing.classList.contains('show')) outgoing.innerHTML = ''; }, 900);
+        this.active = (this.active + 1) % 2;
+        this.anchor = center;
+      },
+
+      // Place the marker at the photo's offset from the anchor, clamped inside the box.
+      placeMarker(loc) {
+        const box = this.el.getBoundingClientRect();
+        const a = this.tileXY(this.anchor.lat, this.anchor.lon, this.ZOOM);
+        const p = this.tileXY(loc.lat, loc.lon, this.ZOOM);
+        let dx = (p.x - a.x) * 256, dy = (p.y - a.y) * 256;
+        const maxX = box.width * 0.44, maxY = box.height * 0.44;
+        dx = Math.max(-maxX, Math.min(maxX, dx));
+        dy = Math.max(-maxY, Math.min(maxY, dy));
+        this.marker.style.display = '';
+        this.marker.style.left = (box.width / 2 + dx) + 'px';
+        this.marker.style.top = (box.height / 2 + dy) + 'px';
+      },
+
+      // The per-photo entry point. Missing coordinates keep the last map (trip context).
+      update(photo) {
+        if (!photo || typeof photo.lat !== 'number' || typeof photo.lon !== 'number') return;
+        const loc = { lat: photo.lat, lon: photo.lon };
+        if (!this.anchor || this.distanceKm(this.anchor, loc) > this.RECENTER_KM) {
+          this.render(loc);
+        }
+        this.placeMarker(loc);
+        this.el.classList.add('show');
+      },
+
+      hide() { this.el.classList.remove('show'); }
+    };
+
+    // ------------------------------------------------------------------ ambient music
+    // Fully synthesized on the TV via Web Audio — zero assets, zero licensing. A slow four-
+    // chord pad (two detuned oscillators per note through a gently wandering lowpass and a
+    // feedback delay) plus occasional pentatonic sparkles. Cast receivers may start audio
+    // without a user gesture, so this can begin on the first LOAD.
+    const music = {
+      ctx: null, master: null, timer: null, on: false, chordIdx: 0,
+      CHORDS: [
+        [130.81, 164.81, 196.00, 246.94],   // C3 E3 G3 B3   (Cmaj7)
+        [110.00, 130.81, 164.81, 196.00],   // A2 C3 E3 G3   (Am7)
+        [ 87.31, 110.00, 130.81, 164.81],   // F2 A2 C3 E3   (Fmaj7)
+        [ 98.00, 123.47, 146.83, 220.00],   // G2 B2 D3 A3   (Gadd9)
+      ],
+      SPARKLES: [523.25, 587.33, 659.26, 783.99, 880.00],  // C5 D5 E5 G5 A5
+      CHORD_SECONDS: 14,
+
+      ensureContext() {
+        if (this.ctx) return;
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        this.ctx = new AC();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = 0;
+
+        this.filter = this.ctx.createBiquadFilter();
+        this.filter.type = 'lowpass';
+        this.filter.frequency.value = 700;
+        this.filter.Q.value = 0.4;
+        const lfo = this.ctx.createOscillator();
+        lfo.frequency.value = 0.05;
+        const lfoGain = this.ctx.createGain();
+        lfoGain.gain.value = 220;
+        lfo.connect(lfoGain).connect(this.filter.frequency);
+        lfo.start();
+
+        const delay = this.ctx.createDelay(1.0);
+        delay.delayTime.value = 0.45;
+        const fb = this.ctx.createGain(); fb.gain.value = 0.34;
+        const wet = this.ctx.createGain(); wet.gain.value = 0.25;
+        delay.connect(fb).connect(delay);
+        this.filter.connect(delay).connect(wet).connect(this.master);
+        this.filter.connect(this.master);
+        this.master.connect(this.ctx.destination);
+      },
+
+      note(freq, t0, dur, level) {
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(0, t0);
+        g.gain.linearRampToValueAtTime(level, t0 + Math.min(4, dur * 0.35));
+        g.gain.setValueAtTime(level, t0 + dur - Math.min(5, dur * 0.4));
+        g.gain.linearRampToValueAtTime(0, t0 + dur);
+        for (const [type, detune, mix] of [['sine', 0, 1], ['triangle', 6, 0.35]]) {
+          const o = this.ctx.createOscillator();
+          o.type = type; o.frequency.value = freq; o.detune.value = detune;
+          const og = this.ctx.createGain(); og.gain.value = mix;
+          o.connect(og).connect(g);
+          o.start(t0); o.stop(t0 + dur + 0.1);
+        }
+        g.connect(this.filter);
+      },
+
+      scheduleChord() {
+        if (!this.on || !this.ctx) return;
+        const t0 = this.ctx.currentTime + 0.05;
+        const dur = this.CHORD_SECONDS + 4;               // overlap into the next chord
+        const chord = this.CHORDS[this.chordIdx % this.CHORDS.length];
+        this.chordIdx++;
+        chord.forEach((f, i) => this.note(f, t0 + i * 0.35, dur, 0.055));
+        // A couple of soft high sparkles at random moments inside the chord.
+        for (let k = 0; k < 2; k++) {
+          const f = this.SPARKLES[Math.floor(Math.random() * this.SPARKLES.length)];
+          this.note(f, t0 + 2 + Math.random() * (this.CHORD_SECONDS - 4), 3.2, 0.016);
+        }
+        this.timer = setTimeout(() => this.scheduleChord(), this.CHORD_SECONDS * 1000);
+      },
+
+      start() {
+        if (this.on) return;
+        this.ensureContext();
+        if (!this.ctx) return;
+        this.on = true;
+        this.ctx.resume && this.ctx.resume();
+        this.master.gain.cancelScheduledValues(this.ctx.currentTime);
+        this.master.gain.setValueAtTime(this.master.gain.value, this.ctx.currentTime);
+        this.master.gain.linearRampToValueAtTime(0.12, this.ctx.currentTime + 3);
+        this.scheduleChord();
+      },
+
+      stop() {
+        if (!this.on) return;
+        this.on = false;
+        clearTimeout(this.timer);
+        if (this.ctx) {
+          this.master.gain.cancelScheduledValues(this.ctx.currentTime);
+          this.master.gain.setValueAtTime(this.master.gain.value, this.ctx.currentTime);
+          this.master.gain.linearRampToValueAtTime(0, this.ctx.currentTime + 1.2);
+        }
+      },
+
+      setEnabled(want) {
+        if (want) {
+          this.start();
+          // Already "on" but the platform suspended the context (audio focus churn):
+          // start() early-returns, so nudge the context back to life here.
+          if (this.ctx && this.ctx.state === 'suspended' && this.ctx.resume) this.ctx.resume();
+        } else {
+          this.stop();
+        }
+      }
+    };
+
+    // ------------------------------------------------------------------ scatter
+    // customData.scatter = { interval: seconds, items: [{url, photo}] }. Five prints fly in
+    // and land scattered; each is then featured (centered + enlarged, caption/map follow) for
+    // `interval`, then returns to its spot. The sender's advance timer is sized to match, so
+    // the next LOAD (a fresh batch or a normal photo) arrives right after the last feature.
+    const scatter = {
+      timers: [], cards: [],
+
+      // Landing anchors (vw/vh offsets from center) — spread over the screen, jittered.
+      ANCHORS: [[-30, -18], [27, -20], [-26, 17], [26, 18], [0, -3]],
+
+      // Sweep the DOM (not just the bookkeeping array) so cards can never leak, no matter
+      // which path — batch swap, showImage, showVideo — got here first.
+      clear() {
+        this.timers.forEach(clearTimeout);
+        this.timers = [];
+        this.cards = [];
+        scatterRoot.querySelectorAll('.card').forEach(c => {
+          const ph = c.querySelector('.ph');
+          if (ph) ph.style.backgroundImage = 'none';
+          c.remove();
+        });
+      },
+
+      preload(url) {
+        return new Promise(resolve => {
+          const img = new Image();
+          const done = () => resolve({ w: img.naturalWidth || 4, h: img.naturalHeight || 3 });
+          img.onload = done;
+          img.onerror = () => resolve({ w: 4, h: 3 });
+          setTimeout(() => resolve({ w: img.naturalWidth || 4, h: img.naturalHeight || 3 }), 1500);
+          img.src = url;
+        });
+      },
+
+      async show(spec) {
+        // Freeze the outgoing batch's choreography but LEAVE its cards on screen while the
+        // new batch preloads — clearing first would black the screen for the preload time.
+        this.timers.forEach(clearTimeout);
+        this.timers = [];
+        const outgoing = this.cards;
+        this.cards = [];
+        const items = spec.items.slice(0, 5);
+        const intervalMs = Math.max(2000, (spec.interval || 6) * 1000);
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const mySeq = ++loadSeq;                        // a newer LOAD cancels this batch
+
+        const sizes = await Promise.all(items.map(it => this.preload(it.url)));
+        if (mySeq !== loadSeq) return;                  // superseded; whoever took over cleared the DOM
+
+        // Swap piles: the old cards fade as the new ones fly in (clear() would still sweep
+        // them if anything interrupts before this timer fires).
+        outgoing.forEach(c => { c.style.opacity = '0'; });
+        this.timers.push(setTimeout(() => outgoing.forEach(c => {
+          const ph = c.querySelector('.ph');
+          if (ph) ph.style.backgroundImage = 'none';
+          c.remove();
+        }), 450));
+
+        // Landing spots: anchors shuffled, with a little jitter and tilt.
+        const spots = this.ANCHORS.slice(0, items.length)
+          .map(a => ({
+            x: (a[0] + (Math.random() * 8 - 4)) / 100 * vw,
+            y: (a[1] + (Math.random() * 6 - 3)) / 100 * vh,
+            r: Math.random() * 26 - 13
+          }))
+          .sort(() => Math.random() - 0.5);
+
+        items.forEach((it, i) => {
+          // Card sized to the photo's own aspect, fitted into ~34vmin.
+          const base = Math.min(vw, vh) * 0.34;
+          const ar = sizes[i].w / sizes[i].h;
+          const w = ar >= 1 ? base : base * ar;
+          const h = ar >= 1 ? base / ar : base;
+
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.style.width = w + 'px';
+          card.style.height = h + 'px';
+          card.style.marginLeft = (-w / 2 - 10) + 'px';   // center (incl. the print border)
+          card.style.marginTop = (-h / 2 - 10) + 'px';
+          card.style.zIndex = 20 + i;
+          const ph = document.createElement('div');
+          ph.className = 'ph';
+          ph.style.backgroundImage = `url("${it.url}")`;
+          card.appendChild(ph);
+
+          // Start off-screen in a random direction, no transition, then fly to the spot.
+          const angle = Math.random() * 2 * Math.PI;
+          const offX = Math.cos(angle) * vw * 1.1, offY = Math.sin(angle) * vh * 1.1;
+          card.style.transition = 'none';
+          card.style.transform = `translate(${offX}px, ${offY}px) rotate(${spots[i].r * 3}deg)`;
+          scatterRoot.appendChild(card);
+          this.cards.push(card);
+
+          this.timers.push(setTimeout(() => {
+            card.style.transition = '';                 // restore the CSS transitions
+            card.style.transform =
+              `translate(${spots[i].x}px, ${spots[i].y}px) rotate(${spots[i].r}deg)`;
+          }, 60 + i * 170));
+
+          // Feature this card in turn: bring to center, straighten, enlarge; dim the rest.
+          // Slightly smaller than a full-bleed photo and nudged upward so the caption and
+          // mini-map along the bottom edge stay readable beside it.
+          const featureAt = 1800 + i * intervalMs;
+          this.timers.push(setTimeout(() => {
+            const scale = Math.min(vw * 0.78 / w, vh * 0.72 / h);
+            card.style.zIndex = 60;
+            card.classList.remove('dim');
+            card.style.transform = `translate(0px, ${-vh * 0.03}px) rotate(0deg) scale(${scale})`;
+            this.cards.forEach(c => { if (c !== card) c.classList.add('dim'); });
+            setCaption(it.photo, '');
+            map.update(it.photo);
+          }, featureAt));
+
+          // …and send it back to its spot when its time is up (the last one stays big
+          // until the next LOAD replaces the batch).
+          if (i < items.length - 1) {
+            this.timers.push(setTimeout(() => {
+              card.style.zIndex = 20 + i;
+              card.style.transform =
+                `translate(${spots[i].x}px, ${spots[i].y}px) rotate(${spots[i].r}deg)`;
+            }, featureAt + intervalMs - 150));
+          }
+        });
+      }
+    };
+
+    // ------------------------------------------------------------------ photos & video
     // Map a focus keyword to a CSS background-position and a Ken Burns drift target.
     function focusToPosition(focus) {
       switch (focus) {
@@ -91,10 +520,25 @@
       }
     }
 
+    // The photo currently on the main layers, so a re-LOAD of the same url+presentation
+    // (the sender's geocode caption update) repaints only the caption/map — no re-transition.
+    // Presentation is part of the key: a preset/focus change re-sends the SAME url and must
+    // still repaint the layer. rotateCurrent publishes a new filename, so it never matches.
+    let lastShown = null;
+
     // p = { fit:'contain'|'cover'|'blur', effect:'none'|'kenburns',
     //       transition:'fade'|'slide'|'cut', focus:'center'|'top'|... }
-    function showImage(url, title, p) {
+    function showImage(url, title, p, photo) {
       p = p || {};
+      // Field-by-field key: NSDictionary -> JSON key order isn't stable across sends.
+      const presKey = [p.fit, p.effect, p.transition, p.focus].join('|');
+      if (lastShown && lastShown.url === url && lastShown.presKey === presKey) {
+        setCaption(photo, title);
+        map.update(photo);
+        return;
+      }
+      lastShown = { url, presKey };
+
       const fit = p.fit || 'contain';
       const effect = p.effect || 'none';
       const transition = p.transition || 'fade';
@@ -102,6 +546,7 @@
 
       idle.style.display = 'none';
       document.body.classList.add('photos');          // hide the video element
+      scatter.clear();
 
       const prev = layers[active];
       const next = layers[(active + 1) % 2];
@@ -129,8 +574,10 @@
         next.classList.add('cut', 'show');
       } else if (transition === 'slide') {
         next.classList.add('slideInStart');
-        // next frame: animate to resting position
+        // next frame: animate to resting position (unless a faster LOAD superseded us —
+        // without the seq check this callback would re-animate a layer it no longer owns)
         requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (next.dataset.seq !== String(loadSeq)) return;
           next.classList.remove('slideInStart');
           next.classList.add('show');
           prev.classList.add('slideOut');
@@ -153,16 +600,46 @@
       }, 1000);
 
       active = (active + 1) % 2;
-      caption.textContent = title || '';
-      caption.classList.toggle('show', !!title);
+      setCaption(photo, title);
+      map.update(photo);
+    }
+
+    function showScatter(spec) {
+      idle.style.display = 'none';
+      document.body.classList.add('photos');
+      lastShown = null;                                // the layers no longer own the screen
+      // Clear the single-photo layers — the batch owns the screen now.
+      layers.forEach(l => { l.classList.remove('show'); l.style.backgroundImage = 'none'; l.className = 'layer'; });
+      backdrop.classList.remove('show'); backdrop.style.backgroundImage = 'none';
+      setCaption(null, '');                            // captions follow the featured card
+      scatter.show(spec);
     }
 
     function showVideo() {
       document.body.classList.remove('photos');        // reveal the video element
+      lastShown = null;
       layers.forEach(l => { l.classList.remove('show'); l.style.backgroundImage = 'none'; });
       backdrop.classList.remove('show'); backdrop.style.backgroundImage = 'none';
-      caption.classList.remove('show');
+      scatter.clear();
+      ++loadSeq;                                       // cancel any in-flight scatter batch
+      setCaption(null, '');
+      map.hide();
       idle.style.display = 'none';
+    }
+
+    // Sender STOP (stop button / Clear): silence the pad and return to the idle screen —
+    // without this the music would keep playing over an empty receiver indefinitely.
+    function handleStopped() {
+      music.stop();
+      lastShown = null;
+      layers.forEach(l => { l.classList.remove('show'); l.style.backgroundImage = 'none'; l.className = 'layer'; });
+      backdrop.classList.remove('show'); backdrop.style.backgroundImage = 'none';
+      scatter.clear();
+      ++loadSeq;
+      setCaption(null, '');
+      map.hide();
+      document.body.classList.add('photos');
+      idle.style.display = '';
     }
 
     // --- Keep the screen awake while we're the foreground "screensaver" -------------
@@ -184,33 +661,62 @@
       if (document.visibilityState === 'visible' && wakeLock === null) acquireWakeLock();
     });
 
-    const context = cast.framework.CastReceiverContext.getInstance();
-    const playerManager = context.getPlayerManager();
-
-    // Intercept every LOAD: route images to our crossfade/slide layer, video to CAF.
-    playerManager.setMessageInterceptor(
-      cast.framework.messages.MessageType.LOAD,
-      (request) => {
-        const media = request.media || {};
-        const ct = (media.contentType || '').toLowerCase();
-        const url = media.contentUrl || media.contentId;
-        const title = (media.metadata && media.metadata.title) || '';
-        const presentation = (media.customData && media.customData.presentation) || {};
-        if (ct.indexOf('image/') === 0) {
-          showImage(url, title, presentation);
+    // ------------------------------------------------------------------ LOAD routing
+    function handleLoad(request) {
+      const media = request.media || {};
+      const ct = (media.contentType || '').toLowerCase();
+      const url = media.contentUrl || media.contentId;
+      const title = (media.metadata && media.metadata.title) || '';
+      const cd = media.customData || {};
+      if (ct.indexOf('image/') === 0) {
+        // Old senders send no music flag — stay silent for them.
+        music.setEnabled(cd.music === true);
+        if (cd.scatter && Array.isArray(cd.scatter.items) && cd.scatter.items.length >= 2) {
+          showScatter(cd.scatter);
         } else {
-          showVideo();
+          showImage(url, title, cd.presentation || {}, cd.photo);
         }
-        return request;   // let CAF process it too (esp. for video)
+      } else {
+        music.setEnabled(false);                       // the video's own audio takes over
+        showVideo();
       }
-    );
+      return request;   // let CAF process it too (esp. for video)
+    }
 
-    // disableIdleTimeout keeps THIS receiver app from being torn down when playback goes
-    // idle (e.g. a single held photo) — without it the device drops back to the launcher.
-    // It does not by itself stop the system screensaver; see the Wake Lock note above.
-    const options = new cast.framework.CastReceiverOptions();
-    options.disableIdleTimeout = true;
-    context.start(options);
+    const TEST_MODE = /[?&]test=1/.test(location.search);
+    if (TEST_MODE) {
+      // Browser test harness: drive the page without a Cast device.
+      window.__pc = { handleLoad, handleStopped, showImage, showScatter, showVideo, music, map, setCaption };
+      idle.textContent = 'PhotoCast — test mode';
+    }
+
+    try {
+      const context = cast.framework.CastReceiverContext.getInstance();
+      const playerManager = context.getPlayerManager();
+
+      // Intercept every LOAD: route images to our layers/scatter, video to CAF.
+      playerManager.setMessageInterceptor(
+        cast.framework.messages.MessageType.LOAD,
+        handleLoad
+      );
+
+      // Sender stop()/clear() sends a STOP media command — tidy the screen and the music.
+      playerManager.setMessageInterceptor(
+        cast.framework.messages.MessageType.STOP,
+        (request) => { handleStopped(); return request; }
+      );
+
+      // disableIdleTimeout keeps THIS receiver app from being torn down when playback goes
+      // idle (e.g. a single held photo) — without it the device drops back to the launcher.
+      // It does not by itself stop the system screensaver; see the Wake Lock note above.
+      const options = new cast.framework.CastReceiverOptions();
+      options.disableIdleTimeout = true;
+      context.start(options);
+    } catch (e) {
+      // Outside a Cast device (browser testing) the framework may refuse to start — the
+      // page's own rendering still works via the harness above.
+      if (!TEST_MODE) throw e;
+    }
     acquireWakeLock();
   </script>
 </body>
