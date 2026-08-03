@@ -81,16 +81,39 @@
       border: 2px solid rgba(255,255,255,.30);
       box-shadow: 0 8px 30px rgba(0,0,0,.55);
       opacity: 0; transition: opacity 700ms ease;
-      background: #1a2129;
+      /* Matches the basemap's own land colour, so the panel doesn't flash a different shade
+         underneath while a recenter's tiles are still arriving. */
+      background: #f2eee7;
     }
     #map.show { opacity: 1; }
     .mapLayer { position: absolute; inset: 0; opacity: 0; transition: opacity 700ms ease; }
     .mapLayer.show { opacity: 1; }
     .mapLayer img { position: absolute; width: 256px; height: 256px; }
+    /* Attribution sits TOP-right now that the bottom of the panel belongs to the place label. */
     #mapAttribution {
-      position: absolute; right: 4px; bottom: 2px; font-size: 10px;
-      color: rgba(0,0,0,.65); background: rgba(255,255,255,.6);
+      position: absolute; right: 4px; top: 3px; font-size: 9px;
+      color: rgba(0,0,0,.6); background: rgba(255,255,255,.55);
       padding: 1px 4px; border-radius: 3px;
+    }
+
+    /* Where this is, in English, across the bottom of the panel. The basemap itself carries no
+       text at all (see map.tileURL), so this label is the ONLY writing on the map — which is what
+       makes "always in English" true regardless of which country the photo is from. Its own
+       gradient doubles as the scrim that keeps it readable over streets and water alike. */
+    #mapLabel {
+      position: absolute; left: 0; right: 0; bottom: 0;
+      padding: 20px 8px 7px; text-align: center; pointer-events: none;
+      background: linear-gradient(to top, rgba(0,0,0,.78), transparent);
+      opacity: 0; transition: opacity 500ms ease;
+    }
+    #mapLabel.show { opacity: 1; }
+    #mapCity {
+      font-size: 17px; font-weight: 700; line-height: 1.15; color: #fff;
+      text-shadow: 1px 1px 0 #000, 0 2px 8px rgba(0,0,0,.9);
+    }
+    #mapCountry {
+      font-size: 13px; font-weight: 500; line-height: 1.25; color: rgba(255,255,255,.86);
+      text-shadow: 1px 1px 0 #000, 0 2px 6px rgba(0,0,0,.9);
     }
 
     /* Scatter: up to five photo "prints" tossed on the table, then featured in turn. */
@@ -111,7 +134,7 @@
     .card.dim { filter: brightness(.55); }
 
     /* Stacking, bottom to top: backdrop -> photo layers (auto) -> resting prints (20-24) ->
-       scrim -> mini-map -> the FEATURED print (45) -> caption -> diagnostics.
+       scrim -> mini-map -> the FEATURED print (45) -> caption -> notice.
        Only the featured photo covers the map; the ones still lying on the table pass behind
        it, so the map is never buried under scenery it isn't describing.
        NOTE #scatter itself must NOT carry a z-index. It's positioned, so a z-index would make
@@ -123,29 +146,41 @@
     #map     { z-index: 40; }
     #caption { z-index: 50; }
 
-    /* The CAF media element (used for video). Hidden while showing photos. */
-    cast-media-player { position: absolute; inset: 0; }
-    body.photos cast-media-player { visibility: hidden; }
+    /* The CAF media element (used for video). It FADES rather than snapping on: cutting from a
+       photo straight to a film's first frame is jarring, and cutting back the instant the film
+       ends is worse. `visibility` is what actually keeps it from swallowing clicks and paint work
+       while photos are up, so it flips at the far end of the fade on the way out (0s delay 600ms)
+       and immediately on the way in — the standard way to make an invisible element fade at all. */
+    cast-media-player {
+      position: absolute; inset: 0;
+      opacity: 0; visibility: hidden;
+      transition: opacity 600ms ease, visibility 0s linear 600ms;
+    }
+    cast-media-player.show {
+      opacity: 1; visibility: visible;
+      transition: opacity 600ms ease, visibility 0s;
+    }
 
     #idle {
       position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
       color: #5a6573; font-size: 26px; letter-spacing: .04em;
     }
 
-    /* Diagnostic card, top-left. Only ever appears when the phone's music was asked for and
-       could not be played — the TV is the only place that failure is observable, so it has to
-       say WHY here rather than fail silently into the ambient pad. Auto-hides. */
-    #diag {
-      position: absolute; left: 48px; top: 40px; z-index: 60; max-width: 46vw;
-      background: rgba(12,16,22,.88); border: 1px solid rgba(255,255,255,.22);
-      border-radius: 10px; padding: 14px 18px; color: #fff;
-      font-size: 15px; line-height: 1.45;
+    /* A single short line, top-centre. This replaced a diagnostic card that printed the media
+       element's error codes and the failing URL over the slideshow — which put a wall of
+       monospace text in front of the one audience that can do nothing about it. Every detail now
+       travels back to the PHONE over the custom namespace (see `report`), and the TV keeps only
+       what the room actually needs to know: that the music quietly became the ambient pad.
+       Nothing else is ever shown here. */
+    #notice {
+      position: absolute; left: 50%; top: 40px; transform: translateX(-50%);
+      z-index: 60; max-width: 60vw;
+      background: rgba(12,16,22,.82); border: 1px solid rgba(255,255,255,.20);
+      border-radius: 999px; padding: 9px 20px; color: rgba(255,255,255,.92);
+      font-size: 16px; line-height: 1.3; white-space: nowrap;
       opacity: 0; transition: opacity 500ms ease; pointer-events: none;
     }
-    #diag.show { opacity: 1; }
-    #diagTitle { font-weight: 700; font-size: 17px; margin-bottom: 6px; }
-    #diagBody { color: rgba(255,255,255,.8); font-family: ui-monospace, Menlo, monospace;
-                font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+    #notice.show { opacity: 1; }
   </style>
 </head>
 <body class="photos">
@@ -161,13 +196,14 @@
   <div id="map">
     <div class="mapLayer" id="mapLayerA"></div>
     <div class="mapLayer" id="mapLayerB"></div>
-    <div id="mapAttribution">© OpenStreetMap</div>
+    <div id="mapAttribution">© OpenStreetMap © CARTO</div>
+    <div id="mapLabel">
+      <div id="mapCity"></div>
+      <div id="mapCountry"></div>
+    </div>
   </div>
   <div id="idle">PhotoCast — ready</div>
-  <div id="diag">
-    <div id="diagTitle"></div>
-    <div id="diagBody"></div>
-  </div>
+  <div id="notice"></div>
 
   <!-- Music streamed from the phone (mode "phone"): the sender exports the chosen songs and
        serves them off its own LAN HTTP server, same as the photos. Separate from
@@ -195,7 +231,12 @@
     // old senders only have metadata.title — keep showing that so they don't regress.
     function setCaption(photo, legacyTitle) {
       let place = '', when = '';
-      if (photo && typeof photo === 'object') {
+      // An EMPTY object counts as "no metadata" and falls through to the legacy title: photos are
+      // now registered as `{}` so a late place name has something to be patched into, and that
+      // placeholder must not silently replace the caption a metadata-less photo would have had.
+      const hasFields = photo && typeof photo === 'object'
+        && (photo.place || photo.dateText || photo.timeText);
+      if (hasFields) {
         place = photo.place || '';
         when = [photo.dateText, photo.timeText].filter(Boolean).join('  ');
         if (!place && when) { place = when; when = ''; }   // time-only: promote to the big line
@@ -211,29 +252,48 @@
     }
 
     // ------------------------------------------------------------------ mini-map
-    // Hand-rolled OpenStreetMap tile compositor (no library): a small box of absolutely
-    // positioned 256px tiles centered on the current anchor. Two layers crossfade on a
-    // recenter, old tiles are freed.
+    // Hand-rolled tile compositor (no library): a small box of absolutely positioned 256px tiles
+    // centered on the current anchor. Two layers crossfade on a recenter, old tiles are freed.
     //
     // There is deliberately NO marker. The point is the photo's general area, not a precise
     // pin — so the map just shows the neighbourhood and the panel reads as context rather
-    // than as a GPS readout. That changes when it has to RECENTER, though: the old design
-    // held one anchor for a whole city (25 km) and let the marker travel inside the box, and
-    // with the marker gone that would leave the map showing a region the photo isn't even in.
-    // So recentering is now driven by the box itself — see `update`.
+    // than as a GPS readout. With no pin, though, the panel is only truthful while the anchor is
+    // near the photo, which is what drives the recentering rule in `update`.
     const map = {
       el: document.getElementById('map'),
       layers: [document.getElementById('mapLayerA'), document.getElementById('mapLayerB')],
+      label: document.getElementById('mapLabel'),
+      city: document.getElementById('mapCity'),
+      country: document.getElementById('mapCountry'),
       active: 0,
       anchor: null,           // {lat, lon} the tiles are centered on
-      // One step in (each level doubles the scale). At this zoom the panel covers roughly a
-      // city rather than a whole region — tight enough to recognise, wide enough to still read
-      // as "the general area" now that there is no pin.
-      ZOOM: 11,
-      // Recenter once the photo drifts past this fraction of the box's half-width/height.
-      // Below it the existing tiles still comfortably contain the photo, so we leave them
-      // alone rather than refetch tiles on every slide.
-      DRIFT_FRACTION: 0.35,
+      // Each level doubles the scale. At 13 the panel covers a district — streets and coastline
+      // are legible, which is what makes it recognisable as somewhere rather than as a
+      // generic patch of map. (It was 11, a whole region, back when the panel had to keep one
+      // anchor for a long time; at that scale nothing was identifiable.)
+      ZOOM: 13,
+      // Recenter once the photo drifts past this fraction of the box's half-width/height — about
+      // 500 m at the size and zoom above. It was 0.35 at zoom 11, which worked out to roughly
+      // NINE KILOMETRES: a whole city's worth of photos shared one anchor, so the map sat on the
+      // first location of the day while the slideshow moved across town. Anything under this
+      // threshold really is inside the tiles already on screen, so the cost of being prompt is
+      // just a tile fetch on genuinely new ground.
+      DRIFT_FRACTION: 0.18,
+
+      // Label-free basemap. Standard OSM raster tiles bake each region's LOCAL language into the
+      // image — a photo from Athens came back in Greek, one from Tokyo in Japanese — and there is
+      // no raster tile server that reliably renders the whole world in English. So the basemap
+      // carries no text at all and #mapLabel draws the place name itself, from the English
+      // reverse-geocode the phone sends. Attribution for both providers is in #mapAttribution.
+      // "voyager_nolabels" over the darker/lighter alternatives because it keeps the COLOUR —
+      // blue water, green parks, yellow arterials — which is what makes a district identifiable
+      // at a glance; the flat monochrome variants render a coastline and a car park alike.
+      TILE_HOSTS: ['a', 'b', 'c', 'd'],
+      tileURL(z, x, y) {
+        const host = this.TILE_HOSTS[Math.abs(x + y) % this.TILE_HOSTS.length];
+        return 'https://' + host + '.basemaps.cartocdn.com/rastertiles/voyager_nolabels/'
+             + z + '/' + x + '/' + y + '.png';
+      },
 
       tileXY(lat, lon, z) {
         const n = Math.pow(2, z);
@@ -261,7 +321,7 @@
             const img = document.createElement('img');
             const wx = ((tx % n) + n) % n;               // wrap antimeridian
             img.onerror = () => img.remove();            // failed tile -> quiet dark gap, no broken icon
-            img.src = `https://tile.openstreetmap.org/${this.ZOOM}/${wx}/${ty}.png`;
+            img.src = this.tileURL(this.ZOOM, wx, ty);
             img.style.left = (tx * 256 - left) + 'px';
             img.style.top = (ty * 256 - top) + 'px';
             incoming.appendChild(img);
@@ -286,17 +346,39 @@
         return Math.max(dx / (box.width / 2), dy / (box.height / 2));
       },
 
-      // The per-photo entry point. Missing coordinates keep the last map (trip context).
+      // City on top, country under it — always in English, whatever the tiles or the phone's own
+      // language. Set on EVERY photo, including the ones that don't move the anchor, so the name
+      // can never lag the picture.
+      setLabel(photo) {
+        const city = (photo && photo.city) || '';
+        const country = (photo && photo.country) || '';
+        this.city.textContent = city;
+        this.country.textContent = country;
+        this.country.style.display = country ? '' : 'none';
+        this.label.classList.toggle('show', !!(city || country));
+      },
+
+      // The per-photo entry point. A photo with no coordinates HIDES the panel rather than
+      // leaving the previous photo's map and city up: an unrelated place named under someone
+      // else's picture is worse than no map, and stripped-EXIF photos (screenshots, forwarded
+      // images) are common enough that the stale panel was on screen for minutes at a time.
       update(photo) {
-        if (!photo || typeof photo.lat !== 'number' || typeof photo.lon !== 'number') return;
+        if (!photo || typeof photo.lat !== 'number' || typeof photo.lon !== 'number') {
+          this.hide();
+          return;
+        }
         const loc = { lat: photo.lat, lon: photo.lon };
         if (!this.anchor || this.driftFromAnchor(loc) > this.DRIFT_FRACTION) {
           this.render(loc);
         }
+        this.setLabel(photo);
         this.el.classList.add('show');
       },
 
-      hide() { this.el.classList.remove('show'); }
+      hide() {
+        this.el.classList.remove('show');
+        this.label.classList.remove('show');
+      }
     };
 
     // ------------------------------------------------------------------ ambient music
@@ -495,19 +577,43 @@
       }
     };
 
-    // ------------------------------------------------------------------ on-screen diagnostics
-    // A failure that only happens on the TV can't be read from a console, so it gets shown.
-    const diag = {
-      el: document.getElementById('diag'),
-      title: document.getElementById('diagTitle'),
-      body: document.getElementById('diagBody'),
+    // ------------------------------------------------------------------ problems -> the phone
+    // A failure that only happens on the TV can't be read from a console, so it has to be
+    // reported somewhere — but NOT here. The TV is what the room is looking at, so an error drawn
+    // over the slideshow interrupts the one thing the app exists to do, in front of the one
+    // audience that can't act on it. Everything therefore goes back to the phone over the custom
+    // namespace, where there's a UI for it and the person holding the device can read it.
+    //
+    // The namespace must match ReceiverChannel.namespace in the app.
+    const NAMESPACE = 'urn:x-cast:com.samixavierlamti.photocast';
+    let castContext = null;
+
+    // Rate-limited per source: a bad album can fail on every one of two hundred photos, and two
+    // hundred identical messages is neither more informative nor kind to the phone's UI.
+    const REPORT_COOLDOWN_MS = 20000;
+    const reportedAt = new Map();
+
+    function report(source, message, detail) {
+      const now = Date.now();
+      if (now - (reportedAt.get(source) || 0) < REPORT_COOLDOWN_MS) return;
+      reportedAt.set(source, now);
+      if (!castContext) return;                 // browser testing, or no session yet
+      try {
+        castContext.sendCustomMessage(NAMESPACE, undefined,
+          { type: 'problem', source: source, message: message, detail: detail || '' });
+      } catch (e) { /* the sender may have gone; there is nothing useful to do about it here */ }
+    }
+
+    // The one thing the TV still says out loud. Deliberately a single short line — the room needs
+    // to know the music quietly changed, not why.
+    const notice = {
+      el: document.getElementById('notice'),
       timer: null,
-      show(title, lines, url) {
-        this.title.textContent = title;
-        this.body.textContent = (lines || []).join('\n') + (url ? '\n' + url : '');
+      show(text) {
+        this.el.textContent = text;
         this.el.classList.add('show');
         clearTimeout(this.timer);
-        this.timer = setTimeout(() => this.hide(), 30000);
+        this.timer = setTimeout(() => this.hide(), 6000);
       },
       hide() { clearTimeout(this.timer); this.el.classList.remove('show'); }
     };
@@ -528,8 +634,8 @@
     //      phone now sends CORS + Private-Network headers, and fetch-to-blob is the backstop;
     //   3. audio/mp4 rather than the UTI table's audio/x-m4a.
     // If all three still fail, `onExhausted` falls back to the synthesized pad rather than
-    // leaving the slideshow silent, the dead playlist isn't retried until it changes, and the
-    // reason is put ON SCREEN via `diag` — the TV is the only place this is observable.
+    // leaving the slideshow silent, the dead playlist isn't retried until it changes, the room
+    // gets one short line (`notice`), and the reason goes to the phone (`report`).
     const stream = {
       el: document.getElementById('tune'),
       tracks: [], idx: 0, sig: '', deadSig: '', on: false, errors: 0, fadeTimer: null,
@@ -553,7 +659,7 @@
           this.triedBlob = false;
           if (this.el.muted) { this.el.muted = false; this.fadeTo(this.TARGET_VOLUME, 1200); }
           this.note('playing ' + (this.tracks[this.idx] && this.tracks[this.idx].title || ''));
-          diag.hide();
+          notice.hide();
         });
       },
 
@@ -649,15 +755,18 @@
 
       // A whole lap of the playlist failing back-to-back means it's unplayable (bad URLs, the
       // phone asleep, or the browser refusing the private-address load) — give up and let the
-      // caller fall back to the pad, and put the reason on screen so it can be diagnosed.
+      // caller fall back to the pad. The room gets one short line; the media error codes, the
+      // rejected play() calls and the failing URL all go to the phone, which is where they can
+      // actually be read and acted on.
       giveUpOnTrack() {
         if (!this.on) return;
         this.errors++;
         if (this.errors >= this.tracks.length) {
           this.deadSig = this.sig;
           this.stop();
-          diag.show('Phone music unavailable — using ambient', this.notes,
-                    (this.tracks[0] && this.tracks[0].url) || '');
+          notice.show('Using ambient music');
+          report('music', 'Your songs could not be played on the TV — using ambient music.',
+                 this.notes.concat([(this.tracks[0] && this.tracks[0].url) || '']).join(' | '));
           if (this.onExhausted) this.onExhausted();
           return;
         }
@@ -773,7 +882,12 @@
           const img = new Image();
           const done = () => resolve({ w: img.naturalWidth || 4, h: img.naturalHeight || 3 });
           img.onload = done;
-          img.onerror = () => resolve({ w: 4, h: 3 });
+          img.onerror = () => {
+            // A print that can't be fetched still lands (as a blank card) so the batch's
+            // choreography stays intact — but the phone is told why one of them is empty.
+            report('media', 'The TV could not load a photo.', url);
+            resolve({ w: 4, h: 3 });
+          };
           setTimeout(() => resolve({ w: img.naturalWidth || 4, h: img.naturalHeight || 3 }), 1500);
           img.src = url;
         });
@@ -787,6 +901,10 @@
         const outgoing = this.cards;
         this.cards = [];
         const items = spec.items.slice(0, 5);
+        // Normalize each item's photo to a real object and register the batch, so a place name
+        // arriving mid-batch reaches even the cards that haven't been featured yet.
+        items.forEach(it => { it.photo = it.photo || {}; });
+        registerPhotos(items);
         const intervalMs = Math.max(2000, (spec.interval || 6) * 1000);
         const vw = window.innerWidth, vh = window.innerHeight;
         const mySeq = ++loadSeq;                        // a newer LOAD cancels this batch
@@ -855,6 +973,7 @@
             card.classList.remove('dim');
             card.style.transform = `translate(0px, ${-vh * 0.03}px) rotate(0deg) scale(${scale})`;
             this.cards.forEach(c => { if (c !== card) c.classList.add('dim'); });
+            activeUrl = it.url;                         // late place names now target THIS print
             setCaption(it.photo, '');
             map.update(it.photo);
           }, featureAt));
@@ -872,7 +991,61 @@
       }
     };
 
+    // ------------------------------------------------------------------ late place names
+    // Reverse-geocoding a photo takes a second or two, so its city and country land AFTER the
+    // photo is already on screen. The phone sends them separately (see ReceiverChannel.sendPlace)
+    // rather than re-sending the LOAD — a re-LOAD would restart the presentation, and in Scatter
+    // the entire fly-in choreography, which is why scattered photos previously never gained a
+    // place name at all.
+    //
+    // The values are patched into the SAME objects the render closures are holding, so a scatter
+    // card that hasn't been featured yet picks the name up when its turn comes.
+    const loadedPhotos = new Map();     // url -> the photo object currently loaded under it
+    let activeUrl = null;               // the one the caption and map are describing right now
+
+    function registerPhotos(entries) {
+      loadedPhotos.clear();
+      for (const e of entries) if (e && e.url) loadedPhotos.set(e.url, e.photo);
+    }
+
+    function applyPlace(msg) {
+      if (!msg || !msg.url) return;
+      const photo = loadedPhotos.get(msg.url);
+      if (!photo) return;                       // for a photo that has since left the screen
+      if (msg.place) photo.place = msg.place;
+      if (msg.city) photo.city = msg.city;
+      if (msg.country) photo.country = msg.country;
+      if (msg.url === activeUrl) {
+        setCaption(photo, '');
+        map.update(photo);
+      }
+    }
+
     // ------------------------------------------------------------------ photos & video
+    // Free the blurred-fill backdrop's pixels, not just its visibility. It holds a full-screen
+    // copy of a photo we've stopped showing, and on a 1-2 GB dongle running for an hour that is
+    // exactly the kind of thing that ends the slideshow.
+    function freeBackdrop() {
+      backdrop.classList.remove('show');
+      setTimeout(() => {
+        if (!backdrop.classList.contains('show')) backdrop.style.backgroundImage = 'none';
+      }, 950);
+    }
+
+    // A photo the TV can't fetch renders as nothing at all — no event, no error, just black —
+    // because it's painted as a CSS background. This probe is the only way to notice, and it
+    // reports to the PHONE; the TV shows nothing. Same URL as the background, so Chrome serves
+    // both from one request and one decode.
+    function watchImageLoad(url, what) {
+      const probe = new Image();
+      probe.onload = () => { probe.onload = probe.onerror = null; };
+      probe.onerror = () => {
+        probe.onload = probe.onerror = null;
+        report('media', 'The TV could not load ' + what + '.', url);
+      };
+      probe.src = url;
+    }
+
     // Map a focus keyword to a CSS background-position and a Ken Burns drift target.
     function focusToPosition(focus) {
       switch (focus) {
@@ -894,6 +1067,9 @@
     //       transition:'fade'|'slide'|'cut', focus:'center'|'top'|... }
     function showImage(url, title, p, photo) {
       p = p || {};
+      photo = photo || {};                   // patched in place when its place name lands
+      registerPhotos([{ url, photo }]);
+      activeUrl = url;
       // Field-by-field key: NSDictionary -> JSON key order isn't stable across sends.
       const presKey = [p.fit, p.effect, p.transition, p.focus].join('|');
       if (lastShown && lastShown.url === url && lastShown.presKey === presKey) {
@@ -909,7 +1085,8 @@
       const { pos, kb } = focusToPosition(p.focus);
 
       idle.style.display = 'none';
-      document.body.classList.add('photos');          // hide the video element
+      document.body.classList.add('photos');
+      hideVideo();                                     // a photo replaced the film
       scatter.clear();
 
       const prev = layers[active];
@@ -922,8 +1099,10 @@
         backdrop.style.backgroundImage = `url("${url}")`;
         backdrop.classList.add('show');
       } else {
-        backdrop.classList.remove('show');
+        freeBackdrop();
       }
+
+      watchImageLoad(url, 'a photo');
 
       // Paint the incoming layer.
       next.className = 'layer';                        // reset state classes
@@ -971,7 +1150,9 @@
     function showScatter(spec) {
       idle.style.display = 'none';
       document.body.classList.add('photos');
+      hideVideo();
       lastShown = null;                                // the layers no longer own the screen
+      activeUrl = null;                                // set per featured card
       // Clear the single-photo layers — the batch owns the screen now.
       layers.forEach(l => { l.classList.remove('show'); l.style.backgroundImage = 'none'; l.className = 'layer'; });
       backdrop.classList.remove('show'); backdrop.style.backgroundImage = 'none';
@@ -979,9 +1160,30 @@
       scatter.show(spec);
     }
 
+    // --- Video, with the breathing room a film needs beside a photo slideshow ---------
+    // Cutting from a photo straight into a moving picture is abrupt, and cutting back out the
+    // frame the film ends on is worse — the last shot never gets to land. So: fade the player up
+    // over the outgoing photo, let it settle for a beat BEFORE the first frame moves, and when the
+    // film ends hold that last frame before fading away. The sender waits the same tail out (see
+    // CastController.videoTailSeconds) so the next photo doesn't arrive during the hold.
+    const player = document.querySelector('cast-media-player');
+    const VIDEO_FADE_MS = 600;    // must match the CSS transition on cast-media-player
+    const VIDEO_LEAD_MS = 1000;   // faded in, first frame held, THEN it starts moving
+    const VIDEO_TAIL_MS = 2000;   // the last frame stays up this long before fading out
+    let videoStartTimer = null, videoEndTimer = null;
+    /// True once the film has been set rolling (by us, or by the phone pressing play/pause), which
+    /// makes the lead-in a strictly one-shot affair. Without it the belt below would re-issue
+    /// play() on any later status update — so pausing from the phone mid-film would silently
+    /// un-pause itself a few seconds later.
+    let videoRolling = false;
+
     function showVideo() {
-      document.body.classList.remove('photos');        // reveal the video element
+      clearTimeout(videoStartTimer); clearTimeout(videoEndTimer);
+      videoStartTimer = null;
+      videoRolling = false;
+      document.body.classList.remove('photos');
       lastShown = null;
+      activeUrl = null;
       layers.forEach(l => { l.classList.remove('show'); l.style.backgroundImage = 'none'; });
       backdrop.classList.remove('show'); backdrop.style.backgroundImage = 'none';
       scatter.clear();
@@ -989,14 +1191,53 @@
       setCaption(null, '');
       map.hide();
       idle.style.display = 'none';
+      player.classList.add('show');                    // fade up over whatever was there
+    }
+
+    /// Take the player back down at once (a photo LOAD, or a STOP, arrived instead of the film
+    /// ending naturally — no last frame worth holding in either case).
+    function hideVideo() {
+      clearTimeout(videoStartTimer); clearTimeout(videoEndTimer);
+      videoStartTimer = null;
+      videoRolling = false;
+      player.classList.remove('show');
+    }
+
+    /// The film ended: leave its closing frame up, then fade out. The next photo's own fade-in
+    /// takes over from black.
+    function holdThenHideVideo() {
+      clearTimeout(videoEndTimer);
+      videoEndTimer = setTimeout(() => player.classList.remove('show'), VIDEO_TAIL_MS);
+    }
+
+    /// Is a film (rather than a photo) what's on screen? Every video-only handler below is gated
+    /// on this, because the sender's image LOADs go through CAF's player as well — and CAF raises
+    /// its own ERROR on a jpeg it can't play, which without this gate would report a "video
+    /// problem" to the phone for every single photo in the slideshow.
+    function showingVideo() { return !document.body.classList.contains('photos'); }
+
+    /// Roll the film `delay` from now — once per video, and never against a film that is already
+    /// running or that the phone has taken control of.
+    function startVideoAfterLead(playerManager, delay) {
+      if (videoRolling) return;
+      clearTimeout(videoStartTimer);
+      videoStartTimer = setTimeout(() => {
+        videoStartTimer = null;
+        if (!showingVideo() || videoRolling) return;
+        videoRolling = true;
+        playerManager.play();
+      }, delay === undefined ? VIDEO_LEAD_MS : delay);
     }
 
     // Sender STOP (stop button / Clear): silence the pad and return to the idle screen —
     // without this the music would keep playing over an empty receiver indefinitely.
     function handleStopped() {
       music.silence();
-      diag.hide();
+      notice.hide();
+      hideVideo();
       lastShown = null;
+      activeUrl = null;
+      loadedPhotos.clear();
       layers.forEach(l => { l.classList.remove('show'); l.style.backgroundImage = 'none'; l.className = 'layer'; });
       backdrop.classList.remove('show'); backdrop.style.backgroundImage = 'none';
       scatter.clear();
@@ -1045,6 +1286,10 @@
       } else {
         music.silence();                               // the video's own audio takes over
         showVideo();
+        // Load it PAUSED and start it ourselves once the fade-in has settled (VIDEO_LEAD_MS after
+        // CAF reports the media ready). Autoplay would have the film already running underneath
+        // the fade, so the opening second would be watched through a dissolve.
+        request.autoplay = false;
       }
       return request;   // let CAF process it too (esp. for video)
     }
@@ -1052,13 +1297,21 @@
     const TEST_MODE = /[?&]test=1/.test(location.search);
     if (TEST_MODE) {
       // Browser test harness: drive the page without a Cast device.
-      window.__pc = { handleLoad, handleStopped, showImage, showScatter, showVideo,
-                      music, ambient, stream, diag, AMBIENT_STYLES, map, setCaption, CARD_PAD };
+      window.__pc = { handleLoad, handleStopped, showImage, showScatter, showVideo, hideVideo,
+                      holdThenHideVideo, applyPlace, loadedPhotos, notice, report,
+                      music, ambient, stream, AMBIENT_STYLES, map, setCaption, CARD_PAD,
+                      get activeUrl() { return activeUrl; },
+                      // Lets a test stand in for the Cast context and assert what `report` would
+                      // have sent to the phone — the whole point of the error path is what leaves
+                      // the TV, and there is no other way to observe it off a device.
+                      set castContext(c) { castContext = c; },
+                      resetReportCooldown() { reportedAt.clear(); } };
       idle.textContent = 'PhotoCast — test mode';
     }
 
     try {
       const context = cast.framework.CastReceiverContext.getInstance();
+      castContext = context;                 // `report` sends the TV's problems to the phone
       const playerManager = context.getPlayerManager();
 
       // Intercept every LOAD: route images to our layers/scatter, video to CAF.
@@ -1073,11 +1326,63 @@
         (request) => { handleStopped(); return request; }
       );
 
+      // The phone took over playback — cancel our lead-in rather than un-pausing a beat later.
+      const yieldPlaybackControl = (request) => {
+        clearTimeout(videoStartTimer);
+        videoStartTimer = null;
+        videoRolling = true;
+        return request;
+      };
+      playerManager.setMessageInterceptor(cast.framework.messages.MessageType.PAUSE, yieldPlaybackControl);
+      playerManager.setMessageInterceptor(cast.framework.messages.MessageType.PLAY, yieldPlaybackControl);
+
+      // The film is loaded and holding its first frame; let it settle, then roll.
+      playerManager.addEventListener(cast.framework.events.EventType.PLAYER_LOAD_COMPLETE, () => {
+        if (showingVideo()) startVideoAfterLead(playerManager);
+      });
+
+      // Belt for the lead-in: because the LOAD is sent with autoplay off, the film only ever
+      // starts because we start it — so if PLAYER_LOAD_COMPLETE never arrives, the slideshow
+      // stops dead on a paused frame and the phone's advance timer never fires either (it waits
+      // for the video to end). Try anyway, well after the lead, rather than hang.
+      playerManager.addEventListener(cast.framework.events.EventType.MEDIA_STATUS, () => {
+        if (showingVideo() && !videoRolling && videoStartTimer === null) {
+          startVideoAfterLead(playerManager, 4000);
+        }
+      });
+
+      // Ended on its own: hold the closing frame, then fade out. An interruption (the phone
+      // skipped, or stopped) is somebody else's transition, so leave those alone.
+      playerManager.addEventListener(cast.framework.events.EventType.MEDIA_FINISHED, (event) => {
+        if (!showingVideo()) return;
+        const reason = event && event.endedReason;
+        if (reason && reason !== 'END_OF_STREAM') return;
+        holdThenHideVideo();
+      });
+
+      // A video the player can't handle: get its error card off the screen and tell the phone.
+      playerManager.addEventListener(cast.framework.events.EventType.ERROR, (event) => {
+        if (!showingVideo()) return;      // CAF also errors on the image LOADs we render ourselves
+        hideVideo();
+        report('video', 'The TV could not play a video.',
+               'detailedErrorCode=' + ((event && event.detailedErrorCode) || '?'));
+      });
+
+      // Late place names from the phone (see ReceiverChannel.sendPlace) — a caption/map repaint
+      // with no re-LOAD, so nothing on screen is disturbed.
+      context.addCustomMessageListener(NAMESPACE, (event) => {
+        const data = event && event.data;
+        if (data && data.type === 'place') applyPlace(data);
+      });
+
       // disableIdleTimeout keeps THIS receiver app from being torn down when playback goes
       // idle (e.g. a single held photo) — without it the device drops back to the launcher.
       // It does not by itself stop the system screensaver; see the Wake Lock note above.
       const options = new cast.framework.CastReceiverOptions();
       options.disableIdleTimeout = true;
+      // Declaring the namespace is what allows sendCustomMessage on it in BOTH directions.
+      options.customNamespaces = Object.assign({}, options.customNamespaces);
+      options.customNamespaces[NAMESPACE] = cast.framework.system.MessageType.JSON;
       context.start(options);
     } catch (e) {
       // Outside a Cast device (browser testing) the framework may refuse to start — the
