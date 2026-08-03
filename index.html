@@ -593,9 +593,13 @@
     const REPORT_COOLDOWN_MS = 20000;
     const reportedAt = new Map();
 
-    function report(source, message, detail) {
+    /// `cooldownMs` overrides the per-source rate limit, for a source whose reports are each about
+    /// a different thing (video start latency: one measurement per film, and a suppressed one
+    /// would read as "that film was fine").
+    function report(source, message, detail, cooldownMs) {
       const now = Date.now();
-      if (now - (reportedAt.get(source) || 0) < REPORT_COOLDOWN_MS) return;
+      const cooldown = cooldownMs === undefined ? REPORT_COOLDOWN_MS : cooldownMs;
+      if (now - (reportedAt.get(source) || 0) < cooldown) return;
       reportedAt.set(source, now);
       if (!castContext) return;                 // browser testing, or no session yet
       try {
@@ -1170,17 +1174,33 @@
     const VIDEO_FADE_MS = 600;    // must match the CSS transition on cast-media-player
     const VIDEO_LEAD_MS = 1000;   // faded in, first frame held, THEN it starts moving
     const VIDEO_TAIL_MS = 2000;   // the last frame stays up this long before fading out
+    const VIDEO_BELT_MS = 4000;   // last resort if no readiness signal ever arrives at all
+    /// A film that takes longer than this from LOAD to first movement waited on something the
+    /// lead-in doesn't explain, so the measurement goes to the phone (see reportVideoStart).
+    const VIDEO_SLOW_MS = 2000;
+    /// One measurement per film, so this is nearly unrestricted — but not entirely, in case some
+    /// pathological loop starts a film over and over.
+    const VIDEO_TIMING_COOLDOWN_MS = 3000;
     let videoStartTimer = null, videoEndTimer = null;
     /// True once the film has been set rolling (by us, or by the phone pressing play/pause), which
     /// makes the lead-in a strictly one-shot affair. Without it the belt below would re-issue
     /// play() on any later status update — so pausing from the phone mid-film would silently
     /// un-pause itself a few seconds later.
     let videoRolling = false;
+    /// True while a real (post-readiness) lead-in is counting down, as distinct from the belt.
+    /// Readiness is announced repeatedly, and re-arming the lead on each announcement would push
+    /// the start one lead further away every time — the film would never move at all.
+    let videoLeadArmed = false;
+    /// Start-latency bookkeeping for the current film: when its LOAD arrived, when the player
+    /// first said it was ready to play (0 = never did), and which signal actually rolled it.
+    let videoLoadAt = 0, videoReadyAt = 0, videoStartTrigger = '';
 
     function showVideo() {
       clearTimeout(videoStartTimer); clearTimeout(videoEndTimer);
       videoStartTimer = null;
       videoRolling = false;
+      videoLeadArmed = false;
+      videoLoadAt = Date.now(); videoReadyAt = 0; videoStartTrigger = '';
       document.body.classList.remove('photos');
       lastShown = null;
       activeUrl = null;
@@ -1200,6 +1220,7 @@
       clearTimeout(videoStartTimer); clearTimeout(videoEndTimer);
       videoStartTimer = null;
       videoRolling = false;
+      videoLeadArmed = false;
       player.classList.remove('show');
     }
 
@@ -1216,17 +1237,51 @@
     /// problem" to the phone for every single photo in the slideshow.
     function showingVideo() { return !document.body.classList.contains('photos'); }
 
-    /// Roll the film `delay` from now — once per video, and never against a film that is already
-    /// running or that the phone has taken control of.
-    function startVideoAfterLead(playerManager, delay) {
+    /// The player has the film loaded and holding its first frame. Recorded once, because CAF
+    /// announces it more than once and the first announcement is the one that measures the wait.
+    function noteVideoReady() { if (!videoReadyAt) videoReadyAt = Date.now(); }
+
+    /// Roll the film `delay` from now — once per video, never against a film that is already
+    /// running or that the phone has taken control of, and never displacing a lead-in that is
+    /// already counting down (see videoLeadArmed). `trigger` names the signal that got us here and
+    /// travels with the measurement; 'belt' marks the last-resort path, which yields to any real
+    /// readiness signal that arrives later but is never pushed back by another belt call.
+    function startVideoAfterLead(playerManager, delay, trigger) {
       if (videoRolling) return;
+      const isLead = trigger !== 'belt';
+      if (isLead && videoLeadArmed) return;
+      if (!isLead && videoStartTimer !== null) return;
       clearTimeout(videoStartTimer);
+      videoLeadArmed = isLead;
+      videoStartTrigger = trigger;
       videoStartTimer = setTimeout(() => {
         videoStartTimer = null;
         if (!showingVideo() || videoRolling) return;
         videoRolling = true;
         playerManager.play();
+        reportVideoStart(playerManager);
       }, delay === undefined ? VIDEO_LEAD_MS : delay);
+    }
+
+    /// How long the film actually took to start moving, sent to the phone when that is longer than
+    /// the lead-in explains. WHERE the time went is the whole diagnosis, so the breakdown travels
+    /// with it: a large `ready` is the network or the player buffering ahead, while a `trigger`
+    /// other than load-complete means the readiness event the lead-in hangs on never arrived and
+    /// something slower had to notice. Silence means the wait was the deliberate lead-in, nothing
+    /// more — which is an answer too.
+    function reportVideoStart(playerManager) {
+      if (!videoLoadAt) return;
+      const total = Date.now() - videoLoadAt;
+      if (total <= VIDEO_SLOW_MS && videoStartTrigger === 'load-complete') return;
+      let clip = 0;
+      try { clip = playerManager.getDurationSec() || 0; } catch (e) { /* nothing to do about it */ }
+      report('video-timing',
+             'A video took ' + (total / 1000).toFixed(1) + ' s to start on the TV.',
+             'ready=' + (videoReadyAt ? ((videoReadyAt - videoLoadAt) / 1000).toFixed(1) + 's' : 'never')
+               + ' lead=' + (VIDEO_LEAD_MS / 1000).toFixed(1) + 's'
+               + ' trigger=' + (videoStartTrigger || '?')
+               + ' clip=' + clip.toFixed(0) + 's',
+             VIDEO_TIMING_COOLDOWN_MS);
     }
 
     // Sender STOP (stop button / Clear): silence the pad and return to the idle screen —
@@ -1299,6 +1354,12 @@
       // Browser test harness: drive the page without a Cast device.
       window.__pc = { handleLoad, handleStopped, showImage, showScatter, showVideo, hideVideo,
                       holdThenHideVideo, applyPlace, loadedPhotos, notice, report,
+                      // The video start path, which is otherwise unobservable off a device: a test
+                      // stands in for the playerManager and asserts which signal rolled the film
+                      // and what latency the phone was told about.
+                      startVideoAfterLead, noteVideoReady, VIDEO_LEAD_MS, VIDEO_BELT_MS,
+                      get videoStartTrigger() { return videoStartTrigger; },
+                      get videoRolling() { return videoRolling; },
                       music, ambient, stream, AMBIENT_STYLES, map, setCaption, CARD_PAD,
                       get activeUrl() { return activeUrl; },
                       // Lets a test stand in for the Cast context and assert what `report` would
@@ -1330,6 +1391,7 @@
       const yieldPlaybackControl = (request) => {
         clearTimeout(videoStartTimer);
         videoStartTimer = null;
+        videoLeadArmed = false;
         videoRolling = true;
         return request;
       };
@@ -1338,16 +1400,29 @@
 
       // The film is loaded and holding its first frame; let it settle, then roll.
       playerManager.addEventListener(cast.framework.events.EventType.PLAYER_LOAD_COMPLETE, () => {
-        if (showingVideo()) startVideoAfterLead(playerManager);
+        if (!showingVideo()) return;
+        noteVideoReady();
+        startVideoAfterLead(playerManager, VIDEO_LEAD_MS, 'load-complete');
       });
 
-      // Belt for the lead-in: because the LOAD is sent with autoplay off, the film only ever
-      // starts because we start it — so if PLAYER_LOAD_COMPLETE never arrives, the slideshow
-      // stops dead on a paused frame and the phone's advance timer never fires either (it waits
-      // for the video to end). Try anyway, well after the lead, rather than hang.
+      // Because the LOAD is sent with autoplay off, the film only ever starts because we start it
+      // — and everything downstream waits on that: the slideshow stops dead on a paused frame and
+      // the phone's advance timer never fires either, since it is waiting for the film to end. So
+      // readiness is read a SECOND, independent way here. A PAUSED player state is the same fact
+      // PLAYER_LOAD_COMPLETE reports (loaded, holding the first frame), just observed from the
+      // other side, and honouring it means a missing load-complete costs the ordinary lead-in
+      // rather than the belt. Anything else — still buffering, or a state we can't read — falls
+      // through to the belt, which fires well after the lead rather than let the show hang.
+      const PlayerState = (cast.framework.messages && cast.framework.messages.PlayerState) || {};
       playerManager.addEventListener(cast.framework.events.EventType.MEDIA_STATUS, () => {
-        if (showingVideo() && !videoRolling && videoStartTimer === null) {
-          startVideoAfterLead(playerManager, 4000);
+        if (!showingVideo() || videoRolling) return;
+        let state = null;
+        try { state = playerManager.getPlayerState(); } catch (e) { /* fall through to the belt */ }
+        if (state === (PlayerState.PAUSED || 'PAUSED')) {
+          noteVideoReady();
+          startVideoAfterLead(playerManager, VIDEO_LEAD_MS, 'media-status');
+        } else {
+          startVideoAfterLead(playerManager, VIDEO_BELT_MS, 'belt');
         }
       });
 
